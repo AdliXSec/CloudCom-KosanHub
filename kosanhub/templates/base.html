@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}KosanHub{% endblock %} · KosanHub</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+{% set nav = [
+    ('web.dashboard', 'Dashboard'),
+    ('web.properties', 'Properti'),
+    ('web.rooms', 'Kamar'),
+    ('web.tenants', 'Penyewa'),
+    ('web.contracts', 'Kontrak'),
+    ('web.bills', 'Tagihan'),
+    ('web.payments', 'Pembayaran'),
+    ('web.arrears', 'Tunggakan'),
+    ('web.jobs', 'Job'),
+] %}
+<header class="topbar">
+    <div class="topbar-inner">
+        <a class="brand" href="{{ url_for('web.dashboard') }}">KosanHub</a>
+        <nav class="nav" aria-label="Navigasi utama">
+            {% for endpoint, label in nav %}
+            <a href="{{ url_for(endpoint) }}"{% if request.endpoint == endpoint %} aria-current="page"{% endif %}>{{ label }}</a>
+            {% endfor %}
+        </nav>
+        <div class="topbar-user">
+            {% if current_user() %}
+            <span class="user-email">{{ current_user().email }}</span>
+            <form method="post" action="{{ url_for('auth.logout') }}" style="display: inline">
+                {{ csrf_input() }}
+                <button type="submit" class="btn-logout">Logout</button>
+            </form>
+            {% else %}
+            <a href="{{ url_for('auth.login') }}" class="btn-login">Masuk</a>
+            {% endif %}
+        </div>
+    </div>
+</header>
+
+<main class="page">
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            {% for category, message in messages %}
+            <div class="flash flash-{{ category }}">{{ message }}</div>
+            {% endfor %}
+        {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+</main>
+</body>
+</html>

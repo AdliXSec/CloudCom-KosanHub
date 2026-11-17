@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+
+{% block title %}Penyewa{% endblock %}
+
+{% block content %}
+<div class="section">
+    <div class="page-head">
+        <h1>Penyewa</h1>
+        <div class="actions">
+            <a href="{{ url_for('admin.tenant_new') }}" class="btn btn-sm">+ Tambah</a>
+        </div>
+    </div>
+    {% if tenants %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Nama</th>
+                    <th>Email</th>
+                    <th>Telepon</th>
+                    <th>Kamar aktif</th>
+                    <th class="num">Aksi</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for t in tenants %}
+                {% set active = t.contracts|selectattr('status', 'equalto', 'ACTIVE')|list %}
+                <tr>
+                    <td>{{ t.name }}</td>
+                    <td class="small">{{ t.email or '—' }}</td>
+                    <td class="small mono">{{ t.phone or '—' }}</td>
+                    <td>{% for c in active %}{{ c.room.kos_property.name }} / {{ c.room.number }}{% if not loop.last %}<br>{% endif %}{% else %}<span class="muted">—</span>{% endfor %}</td>
+                    <td class="num">
+                        <div class="actions">
+                            <a href="{{ url_for('admin.tenant_edit', tenant_id=t.id) }}" class="btn-ghost">Edit</a>
+                            <form method="post" action="{{ url_for('admin.tenant_delete', tenant_id=t.id) }}" onsubmit="return confirm('Hapus penyewa?')">
+                                {{ csrf_input() }}
+                                <button type="submit" class="btn-ghost btn-danger">Hapus</button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="empty">Belum ada penyewa.</p>
+    {% endif %}
+</div>
+{% endblock %}

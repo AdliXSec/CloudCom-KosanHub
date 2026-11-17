@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% from "_macros.html" import bill_table %}
+
+{% block title %}Tunggakan{% endblock %}
+
+{% block content %}
+<div class="section">
+    <h1>Tunggakan per {{ today|tanggal }}</h1>
+    <div class="summary">
+        <div><strong>Total tunggakan:</strong> {{ total|rupiah }}</div>
+        <div><strong>Item:</strong> {{ rows|length }}</div>
+    </div>
+    {% if rows %}
+        {{ bill_table(rows) }}
+    {% else %}
+    <p class="empty">Tidak ada tunggakan</p>
+    {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status %}
+
+{% block title %}Kontrak{% endblock %}
+
+{% block content %}
+<div class="section">
+    <div class="page-head">
+        <h1>Kontrak</h1>
+        <div class="actions">
+            <a href="{{ url_for('admin.contract_new') }}" class="btn btn-sm">+ Sewakan kamar</a>
+        </div>
+    </div>
+    {% if contracts %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Penyewa</th>
+                    <th>Kamar</th>
+                    <th>Mulai</th>
+                    <th>Selesai</th>
+                    <th class="num">Harga/Bulan</th>
+                    <th>Status</th>
+                    <th class="num">Aksi</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for c in contracts %}
+                <tr>
+                    <td>{{ c.tenant.name }}</td>
+                    <td>{{ c.room.kos_property.name }} / {{ c.room.number }}</td>
+                    <td>{{ c.start_date|tanggal }}</td>
+                    <td>{{ c.end_date|tanggal }}</td>
+                    <td class="num">{{ c.monthly_price|rupiah }}</td>
+                    <td>{{ status(c.status) }}</td>
+                    <td class="num">
+                        {% if c.status == 'ACTIVE' %}
+                        <div class="actions">
+                            <form method="post" action="{{ url_for('admin.contract_end', contract_id=c.id) }}" onsubmit="return confirm('Akhiri kontrak?')">
+                                {{ csrf_input() }}
+                                <button type="submit" class="btn-ghost btn-danger">Akhiri</button>
+                            </form>
+                        </div>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="empty">Tidak ada kontrak</p>
+    {% endif %}
+</div>
+{% endblock %}

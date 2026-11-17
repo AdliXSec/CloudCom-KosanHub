@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+
+{% block title %}Pembayaran{% endblock %}
+
+{% block content %}
+<div class="section">
+    <h1>Riwayat Pembayaran</h1>
+    <div class="summary">
+        <div><strong>Total diterima:</strong> {{ total|rupiah }}</div>
+        <div><strong>Transaksi:</strong> {{ payments|length }}</div>
+    </div>
+    {% if payments %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Tanggal bayar</th>
+                    <th>Penyewa</th>
+                    <th>Kamar</th>
+                    <th>Periode</th>
+                    <th>Metode</th>
+                    <th class="num">Nominal</th>
+                    <th>Dicatat</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for p in payments %}
+                {% set b = p.bill %}
+                <tr>
+                    <td>{{ p.paid_on|tanggal }}</td>
+                    <td>{{ b.contract.tenant.name }}</td>
+                    <td>{{ b.contract.room.kos_property.name }} / {{ b.contract.room.number }}</td>
+                    <td class="mono">{{ '%04d-%02d'|format(b.period_year, b.period_month) }}</td>
+                    <td>{{ p.method }}</td>
+                    <td class="num strong">{{ p.amount|rupiah }}</td>
+                    <td class="small muted">{{ p.created_at|waktu_wib }}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="empty">Belum ada pembayaran.</p>
+    {% endif %}
+</div>
+{% endblock %}

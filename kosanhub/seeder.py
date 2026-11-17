@@ -1,16 +1,40 @@
 """Seed data dummy untuk development dan testing."""
+import os
 import click
 from datetime import date, timedelta
 
 from kosanhub import db
+from kosanhub.auth import ensure_admin
 from kosanhub.models import Property, Room, Tenant, Contract
 
 
+# Default khusus development. Production wajib menimpa lewat ADMIN_EMAIL / ADMIN_PASSWORD.
+DEFAULT_ADMIN_EMAIL = "admin@gmail.com"
+DEFAULT_ADMIN_PASSWORD = "password"
+
+
+def _seed_admin():
+    email = os.getenv("ADMIN_EMAIL") or DEFAULT_ADMIN_EMAIL
+    password = os.getenv("ADMIN_PASSWORD") or DEFAULT_ADMIN_PASSWORD
+    if ensure_admin(email, password):
+        click.echo(f"Admin dibuat: {email}")
+        if password == DEFAULT_ADMIN_PASSWORD:
+            click.echo("PERINGATAN: memakai password default dev. Set ADMIN_PASSWORD untuk production.")
+    else:
+        click.echo(f"Admin {email} sudah ada.")
+
+
 def register_cli(app):
+    @app.cli.command("create-admin")
+    def create_admin():
+        """Buat akun admin (idempoten; tidak menimpa password yang sudah ada)."""
+        _seed_admin()
+
     @app.cli.command()
     def seed():
-        """Buat data dummy: properti, kamar, penyewa, kontrak."""
+        """Buat admin, lalu data dummy: properti, kamar, penyewa, kontrak."""
         # Idempoten: aman dijalankan otomatis tiap container app start.
+        _seed_admin()
         if db.session.scalar(db.select(Property.id).limit(1)) is not None:
             click.echo("Seeder dilewati: data sudah ada.")
             return
