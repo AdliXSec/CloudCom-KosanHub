@@ -1,61 +1,122 @@
-"""Halaman web dashboard sederhana."""
-from flask import Blueprint
+"""Halaman web (Jinja2). Hanya membaca data; perubahan data tetap lewat API."""
+from datetime import date, timedelta
 
-web_bp = Blueprint("web", __name__, template_folder="templates")
+from flask import Blueprint, render_template
+
+from kosanhub import db
+from kosanhub.models import Bill, BillingJob, Contract, Payment, Property, Room, Tenant
+from kosanhub.services.billing import outstanding_snapshot
+
+web_bp = Blueprint("web", __name__)
+
+WIB = timedelta(hours=7)  # database menyimpan UTC
+
+
+@web_bp.app_template_filter("rupiah")
+def rupiah(value):
+    return "Rp " + f"{int(value or 0):,}".replace(",", ".")
+
+
+@web_bp.app_template_filter("tanggal")
+def tanggal(value):
+    return value.strftime("%d/%m/%Y") if value else "-"
+
+
+@web_bp.app_template_filter("waktu_wib")
+def waktu_wib(value):
+    return (value + WIB).strftime("%d/%m/%Y %H:%M") if value else "-"
+
+
+def _bill_rows(bills, as_of):
+    """Gabungkan tagihan dengan denda per as_of. Tagihan lunas memakai angka yang sudah dibekukan."""
+    rows = []
+    for bill in bills:
+        if bill.status == Bill.UNPAID:
+            snap = outstanding_snapshot(bill, as_of)
+            fee, total, remaining, late = snap["late_fee"], snap["total_due"], snap["outstanding"], snap["days_late"]
+        else:
+            fee, total, remaining, late = bill.late_fee, bill.total, 0, 0
+        rows.append({"bill": bill, "late_fee": fee, "total": total, "remaining": remaining, "days_late": late})
+    return rows
+
+
+def _arrears(as_of):
+    bills = db.session.scalars(
+        db.select(Bill).where(Bill.status == Bill.UNPAID, Bill.due_date < as_of).order_by(Bill.due_date, Bill.id)
+    ).all()
+    return _bill_rows(bills, as_of)
 
 
 @web_bp.get("/")
-def index():
-    """Dashboard HTML sederhana yang menampilkan statistik kos."""
-    return """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>KosanHub – Manajemen Sewa Kos</title>
-        <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; background: #f5f5f5; color: #333; }
-            header { background: #000; color: #fff; padding: 20px; text-align: center; }
-            h1 { font-size: 28px; }
-            .container { max-width: 960px; margin: 40px auto; padding: 0 20px; }
-            .card { background: #fff; padding: 20px; margin: 20px 0; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-            .endpoint { font-family: monospace; background: #f0f0f0; padding: 8px; margin: 10px 0; }
-            a { color: #0066cc; text-decoration: none; }
-            a:hover { text-decoration: underline; }
-        </style>
-    </head>
-    <body>
-        <header>
-            <h1>🏠 KosanHub</h1>
-            <p>Sistem Manajemen Sewa Kos & Tagihan Bulanan</p>
-        </header>
-        <div class="container">
-            <div class="card">
-                <h2>Selamat Datang</h2>
-                <p>KosanHub adalah aplikasi manajemen kos-kosan dengan fitur tagihan otomatis dan denda keterlambatan.</p>
-            </div>
-            <div class="card">
-                <h2>API Endpoints</h2>
-                <p>Endpoint yang tersedia:</p>
-                <div class="endpoint">GET /health</div>
-                <div class="endpoint">POST /api/jobs/generate-bills (trigger job antrean)</div>
-                <div class="endpoint">GET /api/bills</div>
-                <div class="endpoint">GET /api/contracts</div>
-                <p>Lihat dokumentasi lengkap di <code>README.md</code>.</p>
-            </div>
-            <div class="card">
-                <h2>Fitur Utama</h2>
-                <ul style="margin-left: 20px;">
-                    <li>✓ Manajemen properti, kamar, dan penyewa</li>
-                    <li>✓ Kontrak sewa dengan aturan 1 kamar = 1 kontrak aktif</li>
-                    <li>✓ Tagihan otomatis dengan prorata bulan pertama</li>
-                    <li>✓ Denda keterlambatan (2% per minggu, max 10%)</li>
-                    <li>✓ Background worker untuk pemrosesan massal</li>
-                </ul>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
+def dashboard():
+    today = date.today()
+    rooms = db.session.scalars(db.select(Room)).all()
+    arrears = _arrears(today)
+    unpaid = db.session.scalar(db.select(db.func.count()).select_from(Bill).where(Bill.status == Bill.UNPAID))
+    stats = {
+        "properties": db.session.scalar(db.select(db.func.count()).select_from(Property)),
+        "rooms_total": len(rooms),
+        "rooms_occupied": sum(1 for r in rooms if r.active_contract),
+        "tenants": db.session.scalar(db.select(db.func.count()).select_from(Tenant)),
+        "active_contracts": db.session.scalar(
+            db.select(db.func.count()).select_from(Contract).where(Contract.status == Contract.ACTIVE)
+        ),
+        "unpaid_bills": unpaid,
+        "arrears_count": len(arrears),
+        "arrears_total": sum(r["remaining"] for r in arrears),
+    }
+    return render_template("dashboard.html", stats=stats, arrears=arrears[:5], today=today)
+
+
+@web_bp.get("/properties")
+def properties():
+    items = db.session.scalars(db.select(Property).order_by(Property.id)).all()
+    return render_template("properties.html", properties=items)
+
+
+@web_bp.get("/rooms")
+def rooms():
+    items = db.session.scalars(db.select(Room).order_by(Room.property_id, Room.number)).all()
+    return render_template("rooms.html", rooms=items)
+
+
+@web_bp.get("/tenants")
+def tenants():
+    items = db.session.scalars(db.select(Tenant).order_by(Tenant.id)).all()
+    return render_template("tenants.html", tenants=items)
+
+
+@web_bp.get("/contracts")
+def contracts():
+    items = db.session.scalars(db.select(Contract).order_by(Contract.id)).all()
+    return render_template("contracts.html", contracts=items)
+
+
+@web_bp.get("/bills")
+def bills():
+    today = date.today()
+    items = db.session.scalars(
+        db.select(Bill).order_by(Bill.period_year, Bill.period_month, Bill.id)
+    ).all()
+    return render_template("bills.html", rows=_bill_rows(items, today), today=today)
+
+
+@web_bp.get("/payments")
+def payments():
+    items = db.session.scalars(
+        db.select(Payment).order_by(Payment.paid_on.desc(), Payment.id.desc())
+    ).all()
+    return render_template("payments.html", payments=items, total=sum(p.amount for p in items))
+
+
+@web_bp.get("/arrears")
+def arrears():
+    today = date.today()
+    rows = _arrears(today)
+    return render_template("arrears.html", rows=rows, today=today, total=sum(r["remaining"] for r in rows))
+
+
+@web_bp.get("/jobs")
+def jobs():
+    items = db.session.scalars(db.select(BillingJob).order_by(BillingJob.id.desc())).all()
+    return render_template("jobs.html", jobs=items)

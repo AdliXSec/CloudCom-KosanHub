@@ -2,6 +2,8 @@
 
 
 def register_blueprints(app):
+    from kosanhub.auth import auth_bp, init_auth
+    from kosanhub.routes.admin import admin_bp
     from kosanhub.routes.billing import bills_bp, payments_bp
     from kosanhub.routes.contracts import contracts_bp
     from kosanhub.routes.health import health_bp
@@ -10,8 +12,11 @@ def register_blueprints(app):
     from kosanhub.routes.tenants import tenants_bp
     from kosanhub.routes.web import web_bp
 
+    init_auth(app)
+    app.register_blueprint(auth_bp)
     app.register_blueprint(health_bp)
     app.register_blueprint(web_bp)
+    app.register_blueprint(admin_bp)
     app.register_blueprint(properties_bp, url_prefix="/api/properties")
     app.register_blueprint(rooms_bp, url_prefix="/api/rooms")
     app.register_blueprint(tenants_bp, url_prefix="/api/tenants")

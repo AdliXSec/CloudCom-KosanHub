@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status, empty, bill_table %}
+
+{% block title %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="section">
+    <h1>Dashboard</h1>
+    <div class="stats">
+        <div class="stat">
+            <div class="stat-label">Properti</div>
+            <div class="stat-value">{{ stats.properties }}</div>
+        </div>
+        <div class="stat">
+            <div class="stat-label">Kamar</div>
+            <div class="stat-value">{{ stats.rooms_occupied }}<span class="stat-unit">/ {{ stats.rooms_total }}</span></div>
+        </div>
+        <div class="stat">
+            <div class="stat-label">Penyewa</div>
+            <div class="stat-value">{{ stats.tenants }}</div>
+        </div>
+        <div class="stat">
+            <div class="stat-label">Kontrak Aktif</div>
+            <div class="stat-value">{{ stats.active_contracts }}</div>
+        </div>
+        <div class="stat">
+            <div class="stat-label">Tagihan Belum Lunas</div>
+            <div class="stat-value">{{ stats.unpaid_bills }}</div>
+        </div>
+        <div class="stat">
+            <div class="stat-label">Total Tunggakan</div>
+            <div class="stat-value stat-danger">{{ stats.arrears_total|rupiah }}</div>
+        </div>
+    </div>
+</div>
+
+<div class="section">
+    <h2>Tunggakan Terkini ({{ stats.arrears_count }} total)</h2>
+    {% if arrears %}
+        {{ bill_table(arrears) }}
+    {% else %}
+        {{ empty('Tidak ada tunggakan') }}
+    {% endif %}
+</div>
+{% endblock %}

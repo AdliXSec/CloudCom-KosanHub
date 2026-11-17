@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% from "_macros.html" import status %}
+
+{% block title %}Kamar{% endblock %}
+
+{% block content %}
+<div class="section">
+    <div class="page-head">
+        <h1>Kamar</h1>
+        <div class="actions">
+            <a href="{{ url_for('admin.room_new') }}" class="btn btn-sm">+ Tambah</a>
+        </div>
+    </div>
+    {% if rooms %}
+    <div class="table-wrap">
+        <table>
+            <thead>
+                <tr>
+                    <th>Properti</th>
+                    <th>Nomor</th>
+                    <th class="num">Harga/Bulan</th>
+                    <th>Status</th>
+                    <th>Penyewa</th>
+                    <th class="num">Aksi</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in rooms %}
+                <tr>
+                    <td>{{ r.kos_property.name }}</td>
+                    <td class="mono">#{{ r.number }}</td>
+                    <td class="num">{{ r.monthly_price|rupiah }}</td>
+                    <td>{% if r.active_contract %}<span class="badge badge-active">Ditempati</span>{% else %}<span class="badge">Kosong</span>{% endif %}</td>
+                    <td>{{ r.active_contract.tenant.name if r.active_contract else '—' }}</td>
+                    <td class="num">
+                        <div class="actions">
+                            <a href="{{ url_for('admin.room_edit', room_id=r.id) }}" class="btn-ghost">Edit</a>
+                            <form method="post" action="{{ url_for('admin.room_delete', room_id=r.id) }}" onsubmit="return confirm('Hapus kamar?')">
+                                {{ csrf_input() }}
+                                <button type="submit" class="btn-ghost btn-danger">Hapus</button>
+                            </form>
+                        </div>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% else %}
+    <p class="empty">Tidak ada kamar</p>
+    {% endif %}
+</div>
+{% endblock %}

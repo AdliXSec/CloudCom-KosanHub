@@ -1,0 +1,48 @@
+{% macro status(value) -%}
+{%- set labels = {
+    'ACTIVE': 'Aktif', 'ENDED': 'Selesai',
+    'UNPAID': 'Belum lunas', 'PAID': 'Lunas',
+    'PENDING': 'Antre', 'PROCESSING': 'Diproses', 'COMPLETED': 'Selesai', 'FAILED': 'Gagal'
+} -%}
+<span class="badge badge-{{ value|lower }}">{{ labels.get(value, value) }}</span>
+{%- endmacro %}
+
+{% macro empty(text) -%}
+<p class="empty">{{ text }}</p>
+{%- endmacro %}
+
+{% macro bill_table(rows) -%}
+<div class="table-wrap">
+    <table>
+        <thead>
+            <tr>
+                <th>Penyewa</th>
+                <th>Kamar</th>
+                <th>Periode</th>
+                <th>Jatuh tempo</th>
+                <th class="num">Pokok</th>
+                <th class="num">Denda</th>
+                <th class="num">Sisa</th>
+                <th>Status</th>
+                <th class="num">Aksi</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for r in rows %}
+            {% set b = r.bill %}
+            <tr>
+                <td>{{ b.contract.tenant.name }}</td>
+                <td>{{ b.contract.room.kos_property.name }} / {{ b.contract.room.number }}</td>
+                <td class="mono">{{ '%04d-%02d'|format(b.period_year, b.period_month) }}</td>
+                <td>{{ b.due_date|tanggal }}{% if r.days_late %} <span class="muted">({{ r.days_late }} hari)</span>{% endif %}</td>
+                <td class="num">{{ b.base_amount|rupiah }}</td>
+                <td class="num">{{ r.late_fee|rupiah }}</td>
+                <td class="num strong">{{ r.remaining|rupiah }}</td>
+                <td>{{ status(b.status) }}</td>
+                <td class="num">{% if b.status != 'PAID' %}<div class="actions"><a href="{{ url_for('admin.bill_pay', bill_id=b.id) }}" class="btn-ghost">Bayar</a></div>{% endif %}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{%- endmacro %}

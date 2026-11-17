@@ -1,0 +1,319 @@
+"""Aksi tulis di halaman web (khusus admin; login + CSRF dijaga di kosanhub/auth.py).
+
+Validasi dan aturan bisnis memakai helper dan service yang sama dengan API JSON,
+jadi hasilnya identik (mis. 1 kamar hanya boleh punya 1 kontrak aktif).
+"""
+from datetime import date
+
+from flask import Blueprint, flash, redirect, render_template, request, url_for
+from sqlalchemy.exc import IntegrityError
+
+from kosanhub import db
+from kosanhub.errors import ApiError, ConflictError, NotFoundError
+from kosanhub.models import Bill, Contract, Property, Room, Tenant
+from kosanhub.routes.tenants import _email, _phone
+from kosanhub.routes.web import rupiah
+from kosanhub.services.billing import outstanding_snapshot
+from kosanhub.services.contracts import create_contract, end_contract, pay_bill
+from kosanhub.services.jobs import enqueue_billing_job
+from kosanhub.utils import clean_str, parse_date, parse_int
+
+admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
+
+
+def _f(name, label, type="text", **extra):
+    return {"name": name, "label": label, "type": type, **extra}
+
+
+def _form(title, fields, values, back, lead=None):
+    return render_template("form.html", title=title, fields=fields, values=values, back=back, lead=lead)
+
+
+def _attempt(action):
+    """Jalankan action() lalu commit. Error validasi/bisnis tampil sebagai flash, bukan JSON."""
+    try:
+        message = action()
+        db.session.commit()
+    except ApiError as err:
+        db.session.rollback()
+        flash(err.message, "error")
+        return False
+    except IntegrityError:
+        db.session.rollback()
+        flash("Data bentrok dengan data yang sudah ada.", "error")
+        return False
+    flash(message, "ok")
+    return True
+
+
+def _blank_to_none(value):
+    value = (value or "").strip()
+    return value or None
+
+
+# ---------- properti ----------
+def _property_form(prop):
+    fields = [_f("name", "Nama", required=True), _f("address", "Alamat", required=True)]
+    values = {"name": prop.name, "address": prop.address} if prop else {}
+    if request.method == "POST":
+        values = request.form.to_dict()
+
+        def action():
+            target = prop or Property()
+            target.name = clean_str(values.get("name"), "name", 120)
+            target.address = clean_str(values.get("address"), "address")
+            if prop is None:
+                db.session.add(target)
+            return "Properti disimpan."
+
+        if _attempt(action):
+            return redirect(url_for("web.properties"))
+    title = f"Edit properti {prop.name}" if prop else "Tambah properti"
+    return _form(title, fields, values, url_for("web.properties"))
+
+
+@admin_bp.route("/properties/new", methods=["GET", "POST"])
+def property_new():
+    return _property_form(None)
+
+
+@admin_bp.route("/properties/<int:prop_id>/edit", methods=["GET", "POST"])
+def property_edit(prop_id):
+    return _property_form(db.get_or_404(Property, prop_id))
+
+
+@admin_bp.post("/properties/<int:prop_id>/delete")
+def property_delete(prop_id):
+    prop = db.get_or_404(Property, prop_id)
+
+    def action():
+        if any(r.contracts for r in prop.rooms):
+            raise ConflictError("Properti memiliki kamar dengan riwayat kontrak, tidak dapat dihapus")
+        db.session.delete(prop)
+        return "Properti dihapus."
+
+    _attempt(action)
+    return redirect(url_for("web.properties"))
+
+
+# ---------- kamar ----------
+def _room_form(room):
+    fields = []
+    if room is None:
+        props = db.session.scalars(db.select(Property).order_by(Property.name)).all()
+        fields.append(_f("property_id", "Properti", "select", required=True, options=[(p.id, p.name) for p in props]))
+    fields += [
+        _f("number", "Nomor kamar", required=True),
+        _f("monthly_price", "Harga per bulan (Rp)", "number", required=True, min=1),
+    ]
+    values = {"number": room.number, "monthly_price": room.monthly_price} if room else {}
+    if request.method == "POST":
+        values = request.form.to_dict()
+
+        def action():
+            number = clean_str(values.get("number"), "number", 20)
+            price = parse_int(values.get("monthly_price"), "monthly_price", minimum=1)
+            if room is None:
+                owner = parse_int(values.get("property_id"), "property_id", minimum=1)
+                if db.session.get(Property, owner) is None:
+                    raise NotFoundError("Properti tidak ditemukan")
+            else:
+                owner = room.property_id
+            query = db.select(Room).where(Room.property_id == owner, Room.number == number)
+            if room is not None:
+                query = query.where(Room.id != room.id)
+            if db.session.scalar(query) is not None:
+                raise ConflictError(f"Nomor kamar {number} sudah ada di properti ini")
+            if room is None:
+                db.session.add(Room(property_id=owner, number=number, monthly_price=price))
+            else:
+                room.number = number
+                room.monthly_price = price  # kontrak berjalan tidak berubah (harga dikunci saat kontrak dibuat)
+            return "Kamar disimpan."
+
+        if _attempt(action):
+            return redirect(url_for("web.rooms"))
+    title = f"Edit kamar {room.number}" if room else "Tambah kamar"
+    lead = room.kos_property.name if room else None
+    return _form(title, fields, values, url_for("web.rooms"), lead)
+
+
+@admin_bp.route("/rooms/new", methods=["GET", "POST"])
+def room_new():
+    return _room_form(None)
+
+
+@admin_bp.route("/rooms/<int:room_id>/edit", methods=["GET", "POST"])
+def room_edit(room_id):
+    return _room_form(db.get_or_404(Room, room_id))
+
+
+@admin_bp.post("/rooms/<int:room_id>/delete")
+def room_delete(room_id):
+    room = db.get_or_404(Room, room_id)
+
+    def action():
+        if room.contracts:
+            raise ConflictError("Kamar memiliki riwayat kontrak, tidak dapat dihapus")
+        db.session.delete(room)
+        return "Kamar dihapus."
+
+    _attempt(action)
+    return redirect(url_for("web.rooms"))
+
+
+# ---------- penyewa ----------
+def _tenant_form(tenant):
+    fields = [
+        _f("name", "Nama", required=True),
+        _f("phone", "Telepon", "tel", required=True, help="8-15 digit, boleh diawali +"),
+        _f("email", "Email (opsional)", "email"),
+    ]
+    values = {"name": tenant.name, "phone": tenant.phone, "email": tenant.email or ""} if tenant else {}
+    if request.method == "POST":
+        values = request.form.to_dict()
+
+        def action():
+            target = tenant or Tenant()
+            target.name = clean_str(values.get("name"), "name", 120)
+            target.phone = _phone(values.get("phone"))
+            target.email = _email(values.get("email"))
+            if tenant is None:
+                db.session.add(target)
+            return "Penyewa disimpan."
+
+        if _attempt(action):
+            return redirect(url_for("web.tenants"))
+    title = f"Edit penyewa {tenant.name}" if tenant else "Tambah penyewa"
+    return _form(title, fields, values, url_for("web.tenants"))
+
+
+@admin_bp.route("/tenants/new", methods=["GET", "POST"])
+def tenant_new():
+    return _tenant_form(None)
+
+
+@admin_bp.route("/tenants/<int:tenant_id>/edit", methods=["GET", "POST"])
+def tenant_edit(tenant_id):
+    return _tenant_form(db.get_or_404(Tenant, tenant_id))
+
+
+@admin_bp.post("/tenants/<int:tenant_id>/delete")
+def tenant_delete(tenant_id):
+    tenant = db.get_or_404(Tenant, tenant_id)
+
+    def action():
+        if tenant.contracts:
+            raise ConflictError("Penyewa memiliki riwayat kontrak, tidak dapat dihapus")
+        db.session.delete(tenant)
+        return "Penyewa dihapus."
+
+    _attempt(action)
+    return redirect(url_for("web.tenants"))
+
+
+# ---------- kontrak (menyewakan kamar) ----------
+@admin_bp.route("/contracts/new", methods=["GET", "POST"])
+def contract_new():
+    all_rooms = db.session.scalars(db.select(Room).order_by(Room.property_id, Room.number)).all()
+    vacant = [r for r in all_rooms if r.active_contract is None]
+    tenants = db.session.scalars(db.select(Tenant).order_by(Tenant.name)).all()
+    fields = [
+        _f(
+            "room_id", "Kamar kosong", "select", required=True,
+            options=[(r.id, f"{r.kos_property.name} / {r.number} ({rupiah(r.monthly_price)})") for r in vacant],
+        ),
+        _f("tenant_id", "Penyewa", "select", required=True, options=[(t.id, t.name) for t in tenants]),
+        _f("start_date", "Tanggal mulai", "date", required=True),
+        _f("monthly_price", "Harga per bulan (kosongkan = harga kamar)", "number", min=1),
+        _f("end_date", "Tanggal selesai (opsional)", "date"),
+    ]
+    values = {"room_id": request.args.get("room_id", ""), "start_date": date.today().isoformat()}
+    if request.method == "POST":
+        values = request.form.to_dict()
+
+        def action():
+            create_contract(
+                room_id=parse_int(values.get("room_id"), "room_id", minimum=1),
+                tenant_id=parse_int(values.get("tenant_id"), "tenant_id", minimum=1),
+                start_date=parse_date(values.get("start_date"), "start_date"),
+                monthly_price=parse_int(values["monthly_price"], "monthly_price", minimum=1)
+                if _blank_to_none(values.get("monthly_price"))
+                else None,
+                end_date=parse_date(values["end_date"], "end_date") if _blank_to_none(values.get("end_date")) else None,
+            )
+            return "Kontrak dibuat, kamar disewakan."
+
+        if _attempt(action):
+            return redirect(url_for("web.contracts"))
+    lead = None
+    if not vacant:
+        lead = "Tidak ada kamar kosong."
+    elif not tenants:
+        lead = "Belum ada penyewa. Tambahkan penyewa dulu."
+    return _form("Buat kontrak sewa", fields, values, url_for("web.contracts"), lead)
+
+
+@admin_bp.post("/contracts/<int:contract_id>/end")
+def contract_end(contract_id):
+    contract = db.get_or_404(Contract, contract_id)
+
+    def action():
+        end_contract(contract)
+        return "Kontrak diakhiri."
+
+    _attempt(action)
+    return redirect(url_for("web.contracts"))
+
+
+# ---------- pembayaran ----------
+@admin_bp.route("/bills/<int:bill_id>/pay", methods=["GET", "POST"])
+def bill_pay(bill_id):
+    bill = db.get_or_404(Bill, bill_id)
+    back = url_for("web.bills")
+    if bill.status == Bill.PAID:
+        flash("Tagihan sudah lunas.", "error")
+        return redirect(back)
+    today = date.today()
+    snap = outstanding_snapshot(bill, today)
+    fields = [
+        _f("amount", "Jumlah (Rp)", "number", required=True, min=1),
+        _f("paid_on", "Tanggal bayar", "date", required=True),
+        _f("method", "Metode", required=True),
+    ]
+    values = {"amount": snap["outstanding"], "paid_on": today.isoformat(), "method": "TRANSFER"}
+    if request.method == "POST":
+        values = request.form.to_dict()
+
+        def action():
+            pay_bill(
+                bill,
+                parse_int(values.get("amount"), "amount", minimum=1),
+                paid_on=parse_date(values.get("paid_on"), "paid_on"),
+                method=clean_str(values.get("method") or "TRANSFER", "method", 30),
+            )
+            return "Pembayaran dicatat."
+
+        if _attempt(action):
+            return redirect(back)
+    lead = (
+        f"{bill.contract.tenant.name} · {bill.contract.room.kos_property.name} / {bill.contract.room.number} · "
+        f"{bill.period_year:04d}-{bill.period_month:02d} · sisa {rupiah(snap['outstanding'])} per hari ini"
+    )
+    return _form("Catat pembayaran", fields, values, back, lead)
+
+
+# ---------- job tagihan ----------
+@admin_bp.post("/jobs/generate")
+def job_generate():
+    def action():
+        today = date.today()
+        job = enqueue_billing_job(
+            parse_int(request.form.get("year") or today.year, "year"),
+            parse_int(request.form.get("month") or today.month, "month"),
+        )
+        db.session.flush()
+        return f"Job #{job.id} masuk antrean, akan diproses worker."
+
+    _attempt(action)
+    return redirect(url_for("web.jobs"))
