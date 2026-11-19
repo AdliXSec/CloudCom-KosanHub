@@ -5,20 +5,25 @@ jadi hasilnya identik (mis. 1 kamar hanya boleh punya 1 kontrak aktif).
 """
 from datetime import date
 
-from flask import Blueprint, flash, redirect, render_template, request, url_for
+from flask import Blueprint, flash, redirect, render_template, request, session, url_for
+from werkzeug.security import check_password_hash, generate_password_hash
+from kosanhub.auth import current_user
 from sqlalchemy.exc import IntegrityError
 
 from kosanhub import db
-from kosanhub.errors import ApiError, ConflictError, NotFoundError
-from kosanhub.models import Bill, Contract, Property, Room, Tenant
+from kosanhub.errors import ApiError, ConflictError, NotFoundError, ValidationError
+from kosanhub.models import Bill, Contract, Property, Room, Tenant, User
 from kosanhub.routes.tenants import _email, _phone
 from kosanhub.routes.web import rupiah
 from kosanhub.services.billing import outstanding_snapshot
+from kosanhub.auth import change_password
 from kosanhub.services.contracts import create_contract, end_contract, pay_bill
 from kosanhub.services.jobs import enqueue_billing_job
 from kosanhub.utils import clean_str, parse_date, parse_int
 
 admin_bp = Blueprint("admin", __name__, url_prefix="/admin")
+
+MIN_PASSWORD = 8
 
 
 def _f(name, label, type="text", **extra):
@@ -317,3 +322,73 @@ def job_generate():
 
     _attempt(action)
     return redirect(url_for("web.jobs"))
+
+
+# ---------- profile & user management ----------
+@admin_bp.route("/profile", methods=["GET", "POST"])
+def profile():
+    user = current_user()
+    if request.method == "POST":
+        current_pw = request.form.get("current_password", "")
+        new_pw = request.form.get("new_password", "")
+        confirm = request.form.get("confirm_password", "")
+        if not check_password_hash(user.password_hash, current_pw):
+            flash("Password lama salah.", "error")
+        elif len(new_pw) < MIN_PASSWORD:
+            flash(f"Password baru minimal {MIN_PASSWORD} karakter.", "error")
+        elif new_pw != confirm:
+            flash("Konfirmasi password tidak sama.", "error")
+        else:
+            change_password(user, new_pw)
+            session.clear()  # paksa login ulang di semua sesi browser ini
+            flash("Password diubah. Silakan masuk dengan password baru.", "ok")
+            return redirect(url_for("auth.login"))
+    return render_template("profile.html", user=user)
+
+
+@admin_bp.get("/users")
+def users_list():
+    users = db.session.scalars(db.select(User).order_by(User.id)).all()
+    return render_template("users.html", users=users, current=current_user())
+
+
+@admin_bp.route("/users/new", methods=["GET", "POST"])
+def users_new():
+    if request.method == "POST":
+        email = request.form.get("email", "").strip().lower()
+        password = request.form.get("password", "")
+        
+        def action():
+            if not email:
+                raise ValidationError("Email wajib diisi")
+            if db.session.scalar(db.select(User.id).filter_by(email=email)) is not None:
+                raise ConflictError(f"Email {email} sudah ada")
+            if len(password) < MIN_PASSWORD:
+                raise ValidationError(f"Password minimal {MIN_PASSWORD} karakter")
+            db.session.add(User(email=email, password_hash=generate_password_hash(password)))
+            return f"User {email} ditambahkan."
+        
+        if _attempt(action):
+            return redirect(url_for("admin.users_list"))
+    
+    return render_template("form.html", 
+        title="Tambah user", 
+        fields=[
+            _f("email", "Email", type="email", required=True),
+            _f("password", "Password", type="password", required=True, help="Minimal 8 karakter"),
+        ],
+        values={},
+        back=url_for("admin.users_list"))
+
+
+@admin_bp.post("/users/<int:user_id>/delete")
+def users_delete(user_id):
+    user = db.get_or_404(User, user_id)
+    if user.id == current_user().id:
+        flash("Tidak bisa menghapus akun sendiri.", "error")
+    else:
+        def action():
+            db.session.delete(user)
+            return f"User {user.email} dihapus."
+        _attempt(action)
+    return redirect(url_for("admin.users_list"))

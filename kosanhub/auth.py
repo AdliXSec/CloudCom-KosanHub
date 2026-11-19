@@ -51,6 +51,12 @@ def ensure_admin(email, password):
     return True
 
 
+def change_password(user, new_password):
+    """Ubah password user (dari profile atau admin). Tidak ada validasi kekuatan (dilakukan di route)."""
+    user.password_hash = generate_password_hash(new_password)
+    db.session.commit()
+
+
 def current_user():
     # Cache per request (environ), bukan di `g`: g bisa dipakai bersama antar request
     # kalau app context sudah aktif di luar request (mis. fixture tes).
