@@ -47,7 +47,7 @@ def _arrears(as_of):
     return _bill_rows(bills, as_of)
 
 
-@web_bp.get("/")
+@web_bp.get("/dashboard")
 def dashboard():
     today = date.today()
     rooms = db.session.scalars(db.select(Room)).all()

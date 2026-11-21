@@ -5,19 +5,24 @@ jadi hasilnya identik (mis. 1 kamar hanya boleh punya 1 kontrak aktif).
 """
 from datetime import date
 
-from flask import Blueprint, flash, redirect, render_template, request, session, url_for
+import os
+import uuid
+
+from flask import Blueprint, current_app, flash, redirect, render_template, request, session, url_for
 from werkzeug.security import check_password_hash, generate_password_hash
+from werkzeug.utils import secure_filename
 from kosanhub.auth import current_user
 from sqlalchemy.exc import IntegrityError
 
 from kosanhub import db
 from kosanhub.errors import ApiError, ConflictError, NotFoundError, ValidationError
-from kosanhub.models import Bill, Contract, Property, Room, Tenant, User
+from kosanhub.models import Bill, BookingRequest, Contract, Property, Room, Tenant, User
 from kosanhub.routes.tenants import _email, _phone
 from kosanhub.routes.web import rupiah
 from kosanhub.services.billing import outstanding_snapshot
 from kosanhub.auth import change_password
 from kosanhub.services.contracts import create_contract, end_contract, pay_bill
+from kosanhub.services.bookings import approve_booking, reject_booking
 from kosanhub.services.jobs import enqueue_billing_job
 from kosanhub.utils import clean_str, parse_date, parse_int
 
@@ -101,6 +106,23 @@ def property_delete(prop_id):
     return redirect(url_for("web.properties"))
 
 
+ALLOWED_IMAGE_EXT = {"jpg", "jpeg", "png", "gif", "webp"}
+
+
+def _save_room_image(file):
+    """Simpan file upload gambar kamar, kembalikan path relatif."""
+    if not file or not file.filename:
+        return None
+    ext = file.filename.rsplit(".", 1)[-1].lower() if "." in file.filename else ""
+    if ext not in ALLOWED_IMAGE_EXT:
+        raise ValidationError("Format gambar harus JPG, PNG, GIF, atau WebP")
+    fname = f"{uuid.uuid4().hex}.{ext}"
+    upload_dir = os.path.join(current_app.static_folder, "images", "rooms")
+    os.makedirs(upload_dir, exist_ok=True)
+    file.save(os.path.join(upload_dir, fname))
+    return f"images/rooms/{fname}"
+
+
 # ---------- kamar ----------
 def _room_form(room):
     fields = []
@@ -110,10 +132,13 @@ def _room_form(room):
     fields += [
         _f("number", "Nomor kamar", required=True),
         _f("monthly_price", "Harga per bulan (Rp)", "number", required=True, min=1),
+        _f("image", "Gambar kamar (opsional)", "file", accept="image/*"),
     ]
-    values = {"number": room.number, "monthly_price": room.monthly_price} if room else {}
+    values = {"number": room.number, "monthly_price": room.monthly_price, "image": room.image} if room else {}
     if request.method == "POST":
         values = request.form.to_dict()
+        if room and room.image and not values.get("image"):
+            values["image"] = room.image
 
         def action():
             number = clean_str(values.get("number"), "number", 20)
@@ -129,11 +154,18 @@ def _room_form(room):
                 query = query.where(Room.id != room.id)
             if db.session.scalar(query) is not None:
                 raise ConflictError(f"Nomor kamar {number} sudah ada di properti ini")
+            # Handle image upload
+            image_path = _save_room_image(request.files.get("image"))
             if room is None:
-                db.session.add(Room(property_id=owner, number=number, monthly_price=price))
+                new_room = Room(property_id=owner, number=number, monthly_price=price)
+                if image_path:
+                    new_room.image = image_path
+                db.session.add(new_room)
             else:
                 room.number = number
                 room.monthly_price = price  # kontrak berjalan tidak berubah (harga dikunci saat kontrak dibuat)
+                if image_path:
+                    room.image = image_path
             return "Kamar disimpan."
 
         if _attempt(action):
@@ -227,6 +259,7 @@ def contract_new():
         _f(
             "room_id", "Kamar kosong", "select", required=True,
             options=[(r.id, f"{r.kos_property.name} / {r.number} ({rupiah(r.monthly_price)})") for r in vacant],
+            prices={r.id: r.monthly_price for r in vacant},
         ),
         _f("tenant_id", "Penyewa", "select", required=True, options=[(t.id, t.name) for t in tenants]),
         _f("start_date", "Tanggal mulai", "date", required=True),
@@ -271,6 +304,42 @@ def contract_end(contract_id):
     return redirect(url_for("web.contracts"))
 
 
+# ---------- pengajuan sewa ----------
+@admin_bp.get("/bookings")
+def bookings():
+    status = request.args.get("status", BookingRequest.PENDING)
+    query = db.select(BookingRequest).order_by(BookingRequest.id.desc())
+    if status in (BookingRequest.PENDING, BookingRequest.APPROVED, BookingRequest.REJECTED):
+        query = query.filter_by(status=status)
+    else:
+        status = "ALL"
+    items = db.session.scalars(query).all()
+    pending = db.session.scalar(
+        db.select(db.func.count()).select_from(BookingRequest).filter_by(status=BookingRequest.PENDING)
+    )
+    return render_template("bookings.html", bookings=items, status=status, pending=pending)
+
+
+@admin_bp.post("/bookings/<int:booking_id>/approve")
+def booking_approve(booking_id):
+    def action():
+        booking = approve_booking(booking_id, current_user().id)
+        return f"Pengajuan {booking.name} disetujui, kontrak #{booking.contract_id} dibuat."
+
+    _attempt(action)
+    return redirect(url_for("admin.bookings"))
+
+
+@admin_bp.post("/bookings/<int:booking_id>/reject")
+def booking_reject(booking_id):
+    def action():
+        booking = reject_booking(booking_id, current_user().id)
+        return f"Pengajuan {booking.name} ditolak."
+
+    _attempt(action)
+    return redirect(url_for("admin.bookings"))
+
+
 # ---------- pembayaran ----------
 @admin_bp.route("/bills/<int:bill_id>/pay", methods=["GET", "POST"])
 def bill_pay(bill_id):
@@ -281,11 +350,6 @@ def bill_pay(bill_id):
         return redirect(back)
     today = date.today()
     snap = outstanding_snapshot(bill, today)
-    fields = [
-        _f("amount", "Jumlah (Rp)", "number", required=True, min=1),
-        _f("paid_on", "Tanggal bayar", "date", required=True),
-        _f("method", "Metode", required=True),
-    ]
     values = {"amount": snap["outstanding"], "paid_on": today.isoformat(), "method": "TRANSFER"}
     if request.method == "POST":
         values = request.form.to_dict()
@@ -301,11 +365,7 @@ def bill_pay(bill_id):
 
         if _attempt(action):
             return redirect(back)
-    lead = (
-        f"{bill.contract.tenant.name} · {bill.contract.room.kos_property.name} / {bill.contract.room.number} · "
-        f"{bill.period_year:04d}-{bill.period_month:02d} · sisa {rupiah(snap['outstanding'])} per hari ini"
-    )
-    return _form("Catat pembayaran", fields, values, back, lead)
+    return render_template("pay_bill.html", bill=bill, snap=snap, values=values, back=back, today=today)
 
 
 # ---------- job tagihan ----------
