@@ -44,6 +44,7 @@ class Room(db.Model):
     property_id = db.Column(db.Integer, db.ForeignKey("properties.id"), nullable=False, index=True)
     number = db.Column(db.String(20), nullable=False)
     monthly_price = db.Column(db.Integer, nullable=False)
+    image = db.Column(db.String(255), nullable=True)
     created_at = db.Column(db.DateTime, nullable=False, default=_utcnow)
 
     kos_property = db.relationship("Property", back_populates="rooms")
@@ -59,6 +60,7 @@ class Room(db.Model):
             "property_id": self.property_id,
             "number": self.number,
             "monthly_price": self.monthly_price,
+            "image": self.image,
             "occupied": self.active_contract is not None,
         }
 
@@ -172,6 +174,51 @@ class Payment(db.Model):
             "amount": self.amount,
             "paid_on": self.paid_on.isoformat(),
             "method": self.method,
+        }
+
+
+class BookingRequest(db.Model):
+    """Pengajuan sewa dari publik (tanpa login). Admin setuju/tolak → kontrak + penyewa dibuat."""
+
+    __tablename__ = "booking_requests"
+
+    PENDING = "PENDING"
+    APPROVED = "APPROVED"
+    REJECTED = "REJECTED"
+
+    id = db.Column(db.Integer, primary_key=True)
+    room_id = db.Column(db.Integer, db.ForeignKey("rooms.id"), nullable=False, index=True)
+    name = db.Column(db.String(120), nullable=False)
+    email = db.Column(db.String(120), nullable=False)
+    phone = db.Column(db.String(30), nullable=False)
+    start_date = db.Column(db.Date, nullable=False)
+    notes = db.Column(db.Text, nullable=True)
+    status = db.Column(db.String(10), nullable=False, default=PENDING, index=True)
+    created_at = db.Column(db.DateTime, nullable=False, default=_utcnow)
+    decided_at = db.Column(db.DateTime, nullable=True)
+    decided_by = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=True)
+    tenant_id = db.Column(db.Integer, db.ForeignKey("tenants.id"), nullable=True)
+    contract_id = db.Column(db.Integer, db.ForeignKey("contracts.id"), nullable=True)
+
+    room = db.relationship("Room", foreign_keys=[room_id])
+    decider = db.relationship("User", foreign_keys=[decided_by])
+    tenant = db.relationship("Tenant")
+    contract = db.relationship("Contract")
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "room_id": self.room_id,
+            "name": self.name,
+            "email": self.email,
+            "phone": self.phone,
+            "start_date": self.start_date.isoformat(),
+            "notes": self.notes,
+            "status": self.status,
+            "created_at": self.created_at.isoformat(),
+            "decided_at": self.decided_at.isoformat() if self.decided_at else None,
+            "tenant_id": self.tenant_id,
+            "contract_id": self.contract_id,
         }
 
 

@@ -1,9 +1,11 @@
 """Autentikasi admin tunggal berbasis session Flask.
 
 Hanya ada satu peran: semua baris di tabel users adalah admin.
-- Halaman web (blueprint web, admin) wajib login.
-- API /api/*: baca (GET) terbuka, tulis (POST/PUT/DELETE) wajib admin:
-  session login (browser) atau HTTP Basic (curl -u / Jenkins).
+- Halaman admin (blueprint web, admin) wajib login.
+- API /api/*: semua method wajib admin: session login (browser) atau
+  HTTP Basic (curl -u / Jenkins).
+- Portal publik (blueprint public): lihat properti/kamar, ajukan sewa, cek status
+  tanpa login. Form POST tetap dijaga token CSRF.
 - /health, /login, dan file static tetap terbuka.
 """
 import hmac
@@ -30,7 +32,7 @@ auth_bp = Blueprint("auth", __name__)
 
 API_BLUEPRINTS = {"properties", "rooms", "tenants", "contracts", "bills", "payments", "jobs"}
 LOGIN_REQUIRED_BLUEPRINTS = {"web", "admin"}
-SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+PUBLIC_BLUEPRINTS = {"public"}
 
 # Hash tiruan: login dengan email tak dikenal tetap menghabiskan waktu yang sama.
 _DUMMY_HASH = generate_password_hash("tidak-dipakai")
@@ -108,13 +110,16 @@ def init_auth(app):
     def _guard():
         bp = request.blueprint
         if bp in API_BLUEPRINTS:
-            if request.method not in SAFE_METHODS and current_user() is None and _basic_auth_user() is None:
+            if current_user() is None and _basic_auth_user() is None:
                 resp = jsonify({"error": "Unauthorized", "message": "Login admin diperlukan"})
                 resp.status_code = 401
                 return resp
         elif bp in LOGIN_REQUIRED_BLUEPRINTS:
             if current_user() is None:
                 return redirect(url_for("auth.login", next=request.full_path.rstrip("?")))
+            if request.method == "POST":
+                _verify_csrf()
+        elif bp in PUBLIC_BLUEPRINTS:
             if request.method == "POST":
                 _verify_csrf()
         return None

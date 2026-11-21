@@ -16,3 +16,7 @@ venv/
 *.sqlite3
 .idea/
 .vscode/
+
+# uploaded files
+kosanhub/static/images/rooms/*
+!kosanhub/static/images/rooms/.gitkeep
