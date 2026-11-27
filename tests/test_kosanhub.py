@@ -4,6 +4,10 @@ import pytest
 
 from kosanhub import create_app, db
 from kosanhub.config import TestingConfig
+from kosanhub.models import Property, Room, Tenant, Contract, Bill, BillingJob, User, BookingRequest
+from kosanhub.services.bookings import submit_booking, approve_booking, reject_booking, lookup_status
+from werkzeug.security import generate_password_hash
+import base64
 from kosanhub.models import Property, Room, Tenant, Contract, Bill, BillingJob
 from kosanhub.services.billing import prorated_amount, late_fee_percent, days_late, late_fee_amount, due_date_for
 from kosanhub.services.contracts import create_contract, pay_bill
@@ -24,6 +28,41 @@ def app():
 @pytest.fixture
 def client(app):
     return app.test_client()
+
+
+ADMIN_EMAIL = "admin@test.com"
+ADMIN_PW = "rahasia-123"
+
+
+@pytest.fixture
+def admin(app):
+    user = User(email=ADMIN_EMAIL, password_hash=generate_password_hash(ADMIN_PW))
+    db.session.add(user)
+    db.session.commit()
+    return user
+
+
+@pytest.fixture
+def basic(admin):
+    """Header HTTP Basic untuk klien API (curl -u / Jenkins)."""
+    token = base64.b64encode(f"{ADMIN_EMAIL}:{ADMIN_PW}".encode()).decode()
+    return {"Authorization": f"Basic {token}"}
+
+
+@pytest.fixture
+def adminc(app, admin):
+    """Browser yang sudah login sebagai admin (session)."""
+    c = app.test_client()
+    res = c.post("/login", data={"email": ADMIN_EMAIL, "password": ADMIN_PW})
+    assert res.status_code == 302
+    return c
+
+
+def csrf_of(c, path="/status"):
+    """Ambil token CSRF session dengan membuka halaman yang merender form."""
+    assert c.get(path).status_code == 200
+    with c.session_transaction() as sess:
+        return sess["csrf"]
 
 
 @pytest.fixture
@@ -75,6 +114,46 @@ def test_rule_1_room_single_active_contract(app, seed_data):
 
 
 # ==========================================
+# TEST 2b: Aturan Bisnis 1 dijaga juga oleh database (bukan hanya cek di aplikasi)
+# ==========================================
+def test_rule_1_enforced_by_database_constraint(app, seed_data):
+    from sqlalchemy.exc import IntegrityError
+
+    room1, tenant1, tenant2 = seed_data["room1"], seed_data["tenant1"], seed_data["tenant2"]
+    # Simulasi dua request bersamaan yang sama-sama lolos cek aplikasi: insert langsung ke tabel.
+    db.session.add(Contract(room_id=room1.id, tenant_id=tenant1.id, start_date=date(2026, 11, 1),
+                            monthly_price=1000000, status=Contract.ACTIVE))
+    db.session.commit()
+    db.session.add(Contract(room_id=room1.id, tenant_id=tenant2.id, start_date=date(2026, 11, 2),
+                            monthly_price=1000000, status=Contract.ACTIVE))
+    with pytest.raises(IntegrityError):
+        db.session.commit()
+    db.session.rollback()
+
+
+def test_rule_1_room_reusable_after_contract_ended(app, seed_data):
+    from kosanhub.services.contracts import end_contract
+
+    room1, tenant1, tenant2 = seed_data["room1"], seed_data["tenant1"], seed_data["tenant2"]
+    c1 = create_contract(room1.id, tenant1.id, date(2026, 10, 1))
+    db.session.commit()
+    end_contract(c1, date(2026, 10, 31))
+    db.session.commit()
+    assert c1.active_room_id is None
+
+    c2 = create_contract(room1.id, tenant2.id, date(2026, 11, 1))
+    db.session.commit()
+    assert c2.status == Contract.ACTIVE and c2.active_room_id == room1.id
+
+
+def test_rule_1_api_returns_409_for_second_active_contract(client, basic, seed_data):
+    body = {"room_id": seed_data["room1"].id, "tenant_id": seed_data["tenant1"].id, "start_date": "2026-11-01"}
+    assert client.post("/api/contracts", json=body, headers=basic).status_code == 201
+    body["tenant_id"] = seed_data["tenant2"].id
+    assert client.post("/api/contracts", json=body, headers=basic).status_code == 409
+
+
+# ==========================================
 # TEST 3: Aturan Bisnis 2 (Prorata Bulan Pertama)
 # ==========================================
 def test_rule_2_prorated_first_month(app):
@@ -120,7 +199,7 @@ def test_rule_3_late_fee_calculation():
 # ==========================================
 # TEST 5: Aturan Bisnis 4 (Tagihan Tidak Boleh Terbit 2x)
 # ==========================================
-def test_rule_4_unique_monthly_bill(app, client, seed_data):
+def test_rule_4_unique_monthly_bill(app, client, basic, seed_data):
     room2 = seed_data["room2"]
     tenant2 = seed_data["tenant2"]
 
@@ -128,25 +207,25 @@ def test_rule_4_unique_monthly_bill(app, client, seed_data):
     db.session.commit()
 
     # Terbitkan tagihan pertama
-    res1 = client.post("/api/bills", json={"contract_id": c.id, "year": 2026, "month": 11})
+    res1 = client.post("/api/bills", json={"contract_id": c.id, "year": 2026, "month": 11}, headers=basic)
     assert res1.status_code == 201
 
     # Terbitkan tagihan kedua untuk periode yang sama -> Wajib Conflict (409)
-    res2 = client.post("/api/bills", json={"contract_id": c.id, "year": 2026, "month": 11})
+    res2 = client.post("/api/bills", json={"contract_id": c.id, "year": 2026, "month": 11}, headers=basic)
     assert res2.status_code == 409
 
 
 # ==========================================
 # TEST 6: Tantangan K12 - Job Queue & Worker Processing
 # ==========================================
-def test_k12_worker_processes_billing_queue(app, client, seed_data):
+def test_k12_worker_processes_billing_queue(app, client, basic, seed_data):
     room1 = seed_data["room1"]
     tenant1 = seed_data["tenant1"]
     c = create_contract(room1.id, tenant1.id, date(2026, 11, 1))
     db.session.commit()
 
     # 1. API menerima request trigger job (POST /api/jobs/generate-bills)
-    res = client.post("/api/jobs/generate-bills", json={"year": 2026, "month": 11})
+    res = client.post("/api/jobs/generate-bills", json={"year": 2026, "month": 11}, headers=basic)
     assert res.status_code == 202
     job_id = res.get_json()["id"]
 
